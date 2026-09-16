@@ -4,3 +4,19 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 Thumbs.db
+
+# .NET build outputs and packages
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+*.dll
+*.exe
+*.pdb
+*.nupkg
+*.snupkg
+
+# Local Visual Studio settings
+.vs/
+*.user
+*.suo

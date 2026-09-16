@@ -1,0 +1,15 @@
+Executive summary (2026-09-16T07:14:38-07:00):
+
+Project: lean (C# .NET CLI)
+Purpose: Starts a local MCP (JSON-RPC) server called 'lean-local' to orchestrate file-based research jobs and coordinate remote model adapters (Ollama/Remote).
+Main components:
+- CLI entry: Program.cs, cli.py
+- MCP server & terminal: McpServer.cs, Terminal.cs
+- Research orchestration: Research.cs, ResearchPlan.cs, FileResearch.cs
+- Remote adapters: Remote.cs, Ollama.cs
+- Utilities: LocalRepository.cs, Settings.cs, Logger.cs
+- Models & tests: Models.cs, SelfTests.cs
+
+Coverage: overview-level sampling (first N lines per file). No method-level or protocol validation performed.
+
+Next steps: run focused deep-dive into Program.cs, McpServer.cs, Research.cs, Remote.cs, Ollama.cs to validate JSON-RPC flows and model-call payloads. Enable file-complete/task_complete RPC if you want the MCP job formally closed.
