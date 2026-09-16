@@ -2,7 +2,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from scripts.validate_skill import parse_frontmatter, validate_skill
+from scripts.validate_skill import (
+    PLUGIN_SCHEMA,
+    parse_frontmatter,
+    validate_plugin,
+    validate_skill,
+)
 
 
 class ParseFrontmatterTests(unittest.TestCase):
@@ -51,10 +56,76 @@ class ValidateSkillTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            errors = validate_skill(root, enforce_directory_name=True)
+            errors = validate_skill(root)
 
             self.assertTrue(
                 any("must match containing directory" in error for error in errors)
+            )
+
+
+class ValidatePluginTests(unittest.TestCase):
+    def test_accepts_plugin_with_valid_skill(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skills" / "example-skill"
+            skill.mkdir(parents=True)
+            (root / "plugin.json").write_text(
+                "{"
+                f"\"$schema\":\"{PLUGIN_SCHEMA}\","
+                "\"name\":\"example-plugin\""
+                "}",
+                encoding="utf-8",
+            )
+            (skill / "SKILL.md").write_text(
+                "---\n"
+                "name: example-skill\n"
+                "description: Example description.\n"
+                "---\n\n"
+                "# Instructions\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual([], validate_plugin(root))
+
+    def test_rejects_marketplace_version_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skills" / "example-skill"
+            marketplace = root / ".github" / "plugin"
+            skill.mkdir(parents=True)
+            marketplace.mkdir(parents=True)
+            (root / "plugin.json").write_text(
+                "{"
+                f"\"$schema\":\"{PLUGIN_SCHEMA}\","
+                "\"name\":\"example-plugin\","
+                "\"version\":\"1.0.0\""
+                "}",
+                encoding="utf-8",
+            )
+            (marketplace / "marketplace.json").write_text(
+                "{"
+                "\"plugins\":[{"
+                "\"name\":\"example-plugin\","
+                "\"version\":\"2.0.0\","
+                "\"source\":\".\""
+                "}]"
+                "}",
+                encoding="utf-8",
+            )
+            (skill / "SKILL.md").write_text(
+                "---\n"
+                "name: example-skill\n"
+                "description: Example description.\n"
+                "---\n\n"
+                "# Instructions\n",
+                encoding="utf-8",
+            )
+
+            errors = validate_plugin(root)
+
+            self.assertIn(
+                "marketplace plugin version must match plugin.json",
+                errors,
             )
 
 

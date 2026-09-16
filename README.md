@@ -1,62 +1,164 @@
 # leancopilotv2
 
-A starter repository for a GitHub Copilot Agent Skill.
+An Agent Plugins 1.0 plugin that converts repository documentation into
+focused, reusable GitHub Copilot agent skills.
 
-## Structure
+The plugin provides:
+
+- The `documentation-to-skills` skill for automatic or explicit activation.
+- The `/extract-documentation-skills` slash command in GitHub Copilot CLI.
+- A workflow for inventorying docs, defining skill boundaries, generating
+  skills and references, validating them, and recording migration notes.
+
+## Plugin structure
 
 ```text
 .
-|-- SKILL.md                    # Skill metadata and core instructions
-|-- assets/                     # Templates and static resources
-|-- references/                 # Detailed, on-demand guidance
-|-- scripts/                    # Deterministic helper scripts
-|-- tests/                      # Tests for bundled scripts
+|-- plugin.json
+|-- skills/
+|   `-- documentation-to-skills/
+|       `-- SKILL.md
+|-- com.github.copilot/
+|   `-- commands/
+|       `-- extract-documentation-skills.md
+|-- scripts/
+|-- tests/
 `-- .github/
-    |-- copilot-instructions.md # Instructions for contributors using Copilot
-    `-- workflows/validate.yml  # Skill validation in CI
+    |-- copilot-instructions.md
+    `-- workflows/validate.yml
 ```
 
-GitHub Copilot discovers project skills under `.agents/skills/<skill-name>/`.
-To use this repository as a skill in another project, copy or clone this
-repository to:
+## Install for one repository
+
+Repository scope is the recommended installation mode. It makes the plugin
+available only while Copilot is working in the repository that declares it.
+
+In the target repository, create or update
+`.github/copilot/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "leancopilotv2": {
+      "source": {
+        "source": "github",
+        "repo": "gvp-vikramaditya/leancopilotv2"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "leancopilotv2@leancopilotv2": true
+  }
+}
+```
+
+Commit that file to share the plugin with every contributor and with Copilot
+cloud agent. Use `.github/copilot/settings.local.json` instead when the
+installation should apply only to your local checkout; do not commit the local
+settings file.
+
+Start or restart Copilot CLI from the target repository. The plugin is
+auto-installed and activated for that repository. Verify it with:
 
 ```text
-<project>/.agents/skills/leancopilotv2/
+/plugin list
+/skills list
 ```
 
-The resulting path must contain `SKILL.md` directly:
+The `documentation-to-skills` skill should be listed.
+
+### Use this local checkout from another repository
+
+To develop the plugin locally while using it in another repository, create
+`.github/copilot/settings.local.json` in the target repository:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "leancopilotv2": {
+      "source": {
+        "source": "directory",
+        "path": "C:\\path\\to\\leancopilotv2"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "leancopilotv2@leancopilotv2": true
+  }
+}
+```
+
+Replace the path with the absolute path to this plugin repository. Keep
+`settings.local.json` uncommitted because the path is specific to your machine.
+The directory marketplace is loaded live, so plugin edits take effect in a new
+Copilot session without reinstalling it.
+
+### Use the plugin
+
+Run the slash command:
 
 ```text
-<project>/.agents/skills/leancopilotv2/SKILL.md
+/extract-documentation-skills
 ```
 
-In VS Code, open Copilot Chat in Agent mode and run `/skills` to confirm that
-`leancopilotv2` is discovered.
+Add overrides after the command when needed:
 
-## Customize the skill
+```text
+/extract-documentation-skills scan architecture/ and write skills to .agents/skills/
+```
 
-1. Update the `description` in `SKILL.md` with concrete tasks and trigger words.
-2. Replace the starter workflow in `SKILL.md` with domain-specific procedures.
-3. Put detailed documentation in `references/`.
-4. Put reusable templates or static resources in `assets/`.
-5. Put deterministic automation in `scripts/` and add tests in `tests/`.
-6. Run validation:
+You can also invoke the skill explicitly:
 
-   ```powershell
-   python scripts\validate_skill.py .
-   python -m unittest discover -s tests -v
-   ```
+```text
+Use the /documentation-to-skills skill to convert docs/ into repository skills.
+```
 
-The skill name must remain the same as its containing directory. If you rename
-the repository directory, update the `name` field in `SKILL.md` to match.
-To verify an installed copy's directory name as well as its metadata, run:
+## Install directly for the current user
+
+To install from GitHub outside repository scope, register this repository as a
+marketplace and install the plugin:
 
 ```powershell
-python scripts\validate_skill.py --enforce-directory-name .
+copilot plugin marketplace add gvp-vikramaditya/leancopilotv2
+copilot plugin install leancopilotv2@leancopilotv2
 ```
 
-## Skill format
+This imperative installation is user-scoped and may activate in other
+repositories. Prefer the repository settings method above when the plugin
+should be limited to one repository.
 
-This repository follows the open [Agent Skills specification](https://agentskills.io/specification).
-Keep `SKILL.md` concise and use relative links to load supporting resources only
-when they are needed.
+## Install only the skill
+
+If plugin commands are not needed, install the skill at project scope with
+GitHub CLI 2.90 or later:
+
+```powershell
+gh skill preview gvp-vikramaditya/leancopilotv2 documentation-to-skills
+gh skill install gvp-vikramaditya/leancopilotv2 documentation-to-skills --scope project
+```
+
+Alternatively, copy `skills/documentation-to-skills/` into one of these
+locations in the target repository:
+
+```text
+.github/skills/documentation-to-skills/
+.agents/skills/documentation-to-skills/
+.claude/skills/documentation-to-skills/
+```
+
+Then reload skills in Copilot CLI:
+
+```text
+/skills reload
+```
+
+## Local development
+
+```powershell
+python scripts\validate_skill.py .
+python -m unittest discover -s tests -v
+copilot plugin install .
+```
+
+Reinstall a locally installed plugin after changes because Copilot caches plugin
+components.
