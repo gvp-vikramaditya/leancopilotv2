@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "leancopilotv2",
+  "version": "0.2.0",
+  "description": "Converts repository documentation into focused, reusable GitHub Copilot agent skills.",
+  "author": {
+    "name": "gvp-vikramaditya"
+  },
+  "homepage": "https://github.com/gvp-vikramaditya/leancopilotv2",
+  "repository": "https://github.com/gvp-vikramaditya/leancopilotv2",
+  "keywords": [
+    "copilot",
+    "documentation",
+    "agent-skills",
+    "skill-generation"
+  ]
+}

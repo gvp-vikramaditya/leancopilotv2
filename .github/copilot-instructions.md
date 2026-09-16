@@ -1,12 +1,16 @@
 # Repository instructions
 
-This repository is the source of an Agent Skill named `leancopilotv2`.
+This repository is the source of the Agent Plugins 1.0 plugin
+`leancopilotv2`.
 
-- Preserve the Agent Skills directory contract: `SKILL.md` belongs at the
-  repository root and its `name` must match the containing directory.
-- Keep the `SKILL.md` frontmatter valid and the body concise.
+- Preserve `plugin.json` and the fixed Agent Plugins 1.0 component locations.
+- Keep `.github/plugin/marketplace.json` metadata synchronized with
+  `plugin.json`.
+- Skills belong in immediate subdirectories of `skills/`.
+- Copilot commands belong in `com.github.copilot/commands/`.
+- Keep skill frontmatter valid and bodies concise.
 - Use progressive disclosure: core procedures belong in `SKILL.md`; optional
-  detail belongs in `references/`; reusable files belong in `assets/`.
+  detail belongs in that skill's `references/` directory.
 - Add deterministic helper programs to `scripts/` and tests to `tests/`.
 - Prefer Python standard-library implementations unless a dependency is
   essential to the skill's purpose.
