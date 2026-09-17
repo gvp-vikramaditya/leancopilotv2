@@ -1,6 +1,7 @@
 static class Terminal
 {
-    static readonly bool Interactive = !Console.IsInputRedirected && !Console.IsOutputRedirected;
+    public static bool BatchMode { get; set; }
+    static bool Interactive => !BatchMode && !Console.IsInputRedirected && !Console.IsOutputRedirected;
     static readonly List<string> History = [];
     static readonly string[] Spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     static string Status = "";
@@ -18,6 +19,11 @@ static class Terminal
 
     public static void WriteLine(string text)
     {
+        if (BatchMode)
+        {
+            Console.Error.WriteLine(text);
+            return;
+        }
         if (!Interactive)
         {
             Console.WriteLine(text);

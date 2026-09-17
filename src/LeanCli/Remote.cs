@@ -60,6 +60,24 @@ the optional advanced plan API below is only for persisted range/criterion track
 Consume each delivered batch before choosing dependent slices. Emit brief progress: completed,
 remaining and blocked slices; do not repeat the entire plan on every poll.
 Check each result against its acceptance check, citations and gaps before relying on it.
+BE SKEPTICAL: local summaries are claims to evaluate, not established facts. Read ALL delivered
+findings, references, coverage, exclusions, gaps and attempt failures, including contradictory evidence.
+A valid citation proves source was captured, not that the interpretation is correct; agreement
+between repeated local summaries is not independent proof. Documentation and generated summaries
+describe claims about behavior; they do not prove what executable code actually does.
+For each material conclusion, identify what evidence would support or contradict it. Ask for proof
+through a focused deep-dive: one concrete claim, a discovered file/symbol or known bounded range,
+and an acceptance check requiring the supporting operation/condition, citation and limitations.
+When correctness matters or a claim is doubtful, inspect the smallest permitted excerpt yourself.
+Keep raw source behind explicit excerpts; do not upload the repository or raw local audit files.
+Separate source-observed facts, local-model reports, remote inferences and unresolved claims.
+Runtime/test claims require actual permitted execution results, not a test name or source comment.
+Check important cross-file connections from both ends. Preserve counterexamples and uncertainty;
+do not select only convenient findings, assume unseen code is absent, or invent missing proof.
+Keep proof requests proportional to the user's goal: verify central claims, not every incidental
+detail in an overview. Stay within existing budgets; qualify unsupported claims or report a blocker
+when a required acceptance check cannot be met. Record the evidence and remaining uncertainty
+in the final answer and the short research assessment, not just "the local model says so".
 On missing, invalid or contradictory findings, replan with a narrower question or smaller known range;
 do not repeat an unchanged failed objective or bypass retry/budget limits. If the local model cannot
 support a needed claim, use a permitted bounded excerpt for remote reasoning or report the exact blocker.
@@ -76,6 +94,13 @@ of EVERY eligible file. All files are considered, but their full source is NOT a
 After all overview briefs arrive, request focused deep-dive for key entry points, connections
 or uncertainties needed to answer the question. Do not deepen every file or chase every
 sampling gap. State the bounded coverage honestly in the final answer.
+For "what does this project do?", explain its user-facing purpose, inputs, normal workflow and
+outputs in plain language, not a file inventory. An internal server/adapter is not automatically
+the product's purpose. Trace the normal entry path and its important calls; distinguish optional
+command-line modes from normal startup, and local services from remote providers.
+Before finalizing repository research, obtain a bounded excerpt of relevant executable source
+and cite that exact excerpt in the answer. Do not use a generated executive summary as proof.
+If you say source verification is still needed, DO that work instead of listing it as a future step.
 Use detail=full ONLY if the user explicitly requests exhaustive source or method analysis.
 Do not turn an ordinary explanation into full method enumeration or re-review every test.
 The worker owns discovery, snapshot reads, character-bounded chunking, scheduling and progress.
@@ -114,6 +139,10 @@ components fit together. Do not merely say "performed research", "synthesized a 
 "finalizing". Lean displays this summary as the final response; progress messages are not the answer.
 Do not claim to have delivered an explanation unless the explanation itself is in that summary.
 Never describe an invalid assessment as an unavailable MCP server or missing completion tool.
+The host checks task_complete BEFORE it executes. A denial means continue the same conversation:
+finish/assess pending work, obtain missing source evidence or repair the final answer as instructed.
+Do not call task_complete with partial/blocked prose. A real infrastructure/budget blocker must be
+reported as blocked, without an answer presented as complete; do not work around the host guard.
 Do not finish after an initial batch. Continue until the requested scope is assessed, or an
 explicit infrastructure/access/analysis/budget blocker really prevents further progress.
 File batches are 8 inputs, NOT an 8-file task limit. Task budget is 256 file analyses plus
@@ -194,6 +223,7 @@ Request:
             "--usage-output-file", usageFile, "--additional-mcp-config", "@" + configFile,
             "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update",
             "--disallow-temp-dir", "--allow-tool", $"{McpServer.Name}({McpServer.Tool})",
+            "--plugin-dir", Path.Combine(Path.GetDirectoryName(Path.GetFullPath(usageFile))!, "completion-guard"),
             "--allow-tool", "write", "--allow-tool", "task_complete", "--available-tools"
         })
             start.ArgumentList.Add(argument);
@@ -223,6 +253,7 @@ Request:
             ProcessId = Environment.ProcessId, Started = DateTimeOffset.Now
         }));
         File.WriteAllText(configFile, McpConfig(Environment.CurrentDirectory, localModel, sensitivity, directory));
+        CreateCompletionPlugin(directory);
         var prompt = Prompt(request, sensitivity, execution);
         var timer = Stopwatch.StartNew();
         var seen = new HashSet<string>();
@@ -247,7 +278,14 @@ Request:
             Terminal.ClearActivities();
             ReadProgress(directory, seenProgress, Terminal.WriteLine, activity.Observe);
             ReadLocalRuns();
-            response = GuardCompletion(directory, response);
+            var rejection = exit == 0 ? CompletionIssue(directory, response) : null;
+            var guarded = rejection is null ? GuardCompletion(directory, response) : BlockedAnswer(rejection, response);
+            if (guarded != response)
+            {
+                File.WriteAllText(Path.Combine(directory, "rejected-answer.json"), JsonSerializer.Serialize(response));
+                response = guarded + $"\naudit: {directory}";
+                if (exit == 0) exit = 1;
+            }
             var run = new CopilotRun("remote", model, Environment.CurrentDirectory, prompt, response, commands,
                 ReadUsage(usageFile), timer.Elapsed, exit);
             var reportedStatus = response.ReplaceLineEndings("\n").Split('\n')
@@ -273,7 +311,7 @@ Request:
             // Fail closed on an older CLI rather than silently falling back to prompt-only delegation.
             var help = Command("copilot", "--help");
             foreach (var flag in new[] { "--additional-mcp-config", "--available-tools", "--allow-tool",
-                "--deny-tool", "--usage-output-file", "--no-custom-instructions", "--autopilot", "--max-autopilot-continues" })
+                "--deny-tool", "--usage-output-file", "--no-custom-instructions", "--autopilot", "--max-autopilot-continues", "--plugin-dir" })
                 if (!help.Contains(flag, StringComparison.Ordinal))
                     throw new InvalidOperationException($"Installed Copilot is missing required flag {flag}.");
             using var process = Process.Start(StartInfo(model, configFile, usageFile, execution))
@@ -366,7 +404,27 @@ Request:
 
     public static string GuardCompletion(string directory, string response)
     {
+        var issue = CompletionScopeIssue(directory);
+        var lines = response.ReplaceLineEndings("\n").Split('\n');
+        var status = lines
+            .FirstOrDefault(l => l.StartsWith("status:", StringComparison.OrdinalIgnoreCase))?["status:".Length..].Trim().ToLowerInvariant();
+        if (issue is null && status is not ("partial" or "blocked" or "error")) return response;
+        return BlockedAnswer(issue ?? "The remote did not provide a complete answer; unresolved work remains.", response);
+    }
+
+    static string BlockedAnswer(string issue, string response)
+    {
+        var diagnostics = string.Join("\n", response.ReplaceLineEndings("\n").Split('\n')
+            .Where(l => l.StartsWith("errors:", StringComparison.OrdinalIgnoreCase) ||
+                l.StartsWith("gaps:", StringComparison.OrdinalIgnoreCase)));
+        return $"status: blocked\nerrors: {issue}\nresult: no final answer accepted; rejected draft retained in the request audit" +
+            (diagnostics.Length == 0 ? "" : "\n" + diagnostics);
+    }
+
+    static string? CompletionScopeIssue(string directory)
+    {
         var sourceChanges = new List<string>();
+        var pending = "";
         var jobPaths = Directory.GetFiles(directory, "job-*.json");
         var currentSnapshot = jobPaths.Select(path =>
         {
@@ -381,7 +439,11 @@ Request:
         {
             using var job = JsonDocument.Parse(File.ReadAllText(path));
             var state = job.RootElement.GetProperty("Status").GetString();
-            if (state is not ("done" or "stale")) return true;
+            if (state is not ("done" or "stale"))
+            {
+                pending = $"Job {job.RootElement.GetProperty("Id").GetString()} is {state}. ";
+                return true;
+            }
             if (state == "stale" && job.RootElement.GetProperty("Snapshot").GetInt32() == currentSnapshot)
                 return true;
             if (state == "done" && job.RootElement.TryGetProperty("Fingerprints", out var fingerprints) &&
@@ -394,14 +456,104 @@ Request:
             }
             return sourceChanges.Count > 0;
         });
-        if (!unfinished) return response;
-        var lines = response.ReplaceLineEndings("\n").Split('\n');
-        var index = Array.FindIndex(lines, line => line.StartsWith("status:", StringComparison.OrdinalIgnoreCase));
-        if (index >= 0 && lines[index].Trim().ToLowerInvariant() is not ("status: error" or "status: blocked"))
-            lines[index] = "status: partial";
-        return (index < 0 ? "status: partial\n" : "") + string.Join("\n", lines) +
-            "\ngaps: local research has pending/unreviewed/blocked scope or changed source; remote prose is not completion evidence; audit retained" +
+        if (!unfinished) return null;
+        return pending + "Research has pending/unreviewed/blocked scope or changed source. Use file-status and file-complete " +
+            "for existing jobs (or continue/accept for plans); do not finalize or replace the required scope." +
             (sourceChanges.Count == 0 ? "" : "\nchanged: " + string.Join("; ", sourceChanges.Take(8)));
+    }
+
+    public static string? CompletionIssue(string directory, string summary)
+    {
+        if (CompletionScopeIssue(directory) is { } scopeIssue) return scopeIssue;
+        var lines = summary.ReplaceLineEndings("\n").Split('\n');
+        if (!lines.Any(l => l.Trim().Equals("status: done", StringComparison.OrdinalIgnoreCase)) ||
+            lines.Any(l => l.StartsWith("status:", StringComparison.OrdinalIgnoreCase) &&
+                !l.Trim().Equals("status: done", StringComparison.OrdinalIgnoreCase)) ||
+            !lines.Any(l => l.StartsWith("answer:", StringComparison.OrdinalIgnoreCase) && l["answer:".Length..].Trim().Length > 0))
+            return "Provide status: done and a substantive answer: only after completing the requested work. " +
+                "Partial/blocked answers are not accepted; continue resolving the missing work.";
+        var snapshots = Directory.GetFiles(directory, "job-*.json").Select(path =>
+        {
+            using var job = JsonDocument.Parse(File.ReadAllText(path));
+            return job.RootElement.GetProperty("Snapshot").GetInt32();
+        }).Concat(Directory.GetFiles(directory, "plan-*.json").Select(path =>
+        {
+            using var plan = JsonDocument.Parse(File.ReadAllText(path));
+            return plan.RootElement.GetProperty("Generation").GetInt32();
+        })).ToArray();
+        var research = Directory.EnumerateFiles(directory, "research-*.json").Select(path =>
+            JsonSerializer.Deserialize<CopilotRun>(File.ReadAllText(path)) ?? throw new JsonException("Empty research audit.")).ToArray();
+        if (snapshots.Length == 0 && research.Length == 0) return null;
+        var observedSnapshots = research.SelectMany(r => r.Output.Split('\n').Where(l => l.StartsWith("evidence:")))
+            .Select(l => System.Text.RegularExpressions.Regex.Match(l, @"; snapshot (\d+)"))
+            .Where(m => m.Success).Select(m => int.Parse(m.Groups[1].Value));
+        var snapshot = snapshots.Concat(observedSnapshots).DefaultIfEmpty(1).Max();
+        var proof = research.Any(run =>
+        {
+            return run.Location == "local" && run.ExitCode == 0 &&
+                run.Output.StartsWith("status: ok\n", StringComparison.Ordinal) &&
+                run.Output.Contains($"; snapshot {snapshot}\n", StringComparison.Ordinal) &&
+                run.Commands.Any(c => c.StartsWith("excerpt: ", StringComparison.Ordinal) &&
+                    System.Text.RegularExpressions.Regex.IsMatch(summary,
+                        $@"(?<![\w./\\:-]){System.Text.RegularExpressions.Regex.Escape(c["excerpt: ".Length..])}(?![\w-])"));
+        });
+        return proof ? null : "Repository findings need direct source support before finalization. " +
+            "Request a bounded excerpt of relevant executable source with local_research (intent=excerpt, discovered path/start/end), " +
+            "inspect it, and cite its exact returned range in the final answer. Overview summaries alone are insufficient.";
+    }
+
+    public static void CreateCompletionPlugin(string directory)
+    {
+        var plugin = Path.Combine(directory, "completion-guard");
+        var hooks = Path.Combine(plugin, "com.github.copilot", "hooks");
+        Directory.CreateDirectory(hooks);
+        File.WriteAllText(Path.Combine(plugin, "plugin.json"), JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["$schema"] = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            ["name"] = "lean-completion-guard", ["version"] = "1.0.0",
+            ["description"] = "Rejects premature completion of this Lean request."
+        }));
+        var command = SelfStart("--completion-hook", directory);
+        File.WriteAllText(Path.Combine(hooks, "hooks.json"), JsonSerializer.Serialize(new
+        {
+            version = 1, hooks = new { preToolUse = new[] { new
+            {
+                type = "command", exec = command.FileName, args = command.ArgumentList.ToArray(), timeoutSec = 30
+            } } }
+        }));
+    }
+
+    public static int CompletionHook(string directory, TextReader input, TextWriter output)
+    {
+        try
+        {
+            using var payload = JsonDocument.Parse(input.ReadToEnd());
+            if (payload.RootElement.GetProperty("toolName").GetString() != "task_complete")
+            {
+                output.WriteLine("{}");
+                return 0;
+            }
+            var arguments = payload.RootElement.GetProperty("toolArgs");
+            using var decoded = arguments.ValueKind == JsonValueKind.String ? JsonDocument.Parse(arguments.GetString()!) : null;
+            arguments = decoded?.RootElement ?? arguments;
+            var summary = arguments.TryGetProperty("summary", out var text) && text.ValueKind == JsonValueKind.String
+                ? text.GetString() ?? "" : "";
+            var issue = CompletionIssue(directory, summary);
+            output.WriteLine(issue is null ? "{}" : JsonSerializer.Serialize(new
+            {
+                permissionDecision = "deny", permissionDecisionReason = issue
+            }));
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            Logger.Error($"Completion hook: {ex.Message}");
+            output.WriteLine(JsonSerializer.Serialize(new
+            {
+                permissionDecision = "deny", permissionDecisionReason = "Completion validation failed; do not finalize. " + ex.Message
+            }));
+            return 1;
+        }
     }
 
     public static async Task SendPrompt(StreamWriter input, string prompt)

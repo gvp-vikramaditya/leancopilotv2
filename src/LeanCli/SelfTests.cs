@@ -12,6 +12,7 @@ static class SelfTests
 
     public static void Run()
     {
+        TestPromptMode();
         var root = Path.Combine(AppContext.BaseDirectory, $"self-test-{Guid.NewGuid():N}");
         var audit = Path.Combine(root, "audit");
         Directory.CreateDirectory(root);
@@ -128,9 +129,8 @@ static class SelfTests
                 Check(native.Call("excerpt", "", "..\\outside.cs", 1, 2).StartsWith("status: error"),
                     "native MCP confinement error");
                 var job = native.Files("Review excluded file", [".env"]);
-                var denied = native.FileStatus(Field(job, "jobId"), Resume(job));
-                Check(denied.StartsWith("status: blocked") && denied.Contains("no source captured"),
-                    "native MCP asynchronous file lifecycle preserves permission failures without inference");
+                Check(job.StartsWith("status: error") && !job.Contains("jobId:") && job.Contains("Hidden/generated/private"),
+                    "native MCP rejects excluded paths before creating a failed job or running inference");
             }
             var requests = """
 {"jsonrpc":"2.0","id":1,"method":"tools/list"}
@@ -207,7 +207,8 @@ not json
         Check(start.ArgumentList.Contains("--autopilot") && start.ArgumentList.Contains("--max-autopilot-continues") &&
             start.ArgumentList.Contains("12"), "remote completion loop uses bounded native autopilot in the same conversation");
         Check(start.ArgumentList.Count(a => a == "task_complete") == 2 &&
-            start.ArgumentList.SkipWhile(a => a != "--available-tools").Contains("task_complete"),
+            start.ArgumentList.SkipWhile(a => a != "--available-tools").Contains("task_complete") &&
+            start.ArgumentList.Contains("--plugin-dir"),
             "autopilot completion tool is both available and explicitly permitted");
         Check(Remote.StartInfo("remote", "config.json", "usage.json", true).ArgumentList.Contains("powershell"),
             "explicit execution mode preserves shell implementation capability");
@@ -263,6 +264,11 @@ not json
             Check(prompt.Contains("summary MUST contain the actual final answer") &&
                 prompt.Contains("progress messages are not the answer"),
                 "remote completion instructions require the explanation itself, not an activity recap");
+            Check(prompt.Contains("BE SKEPTICAL") && prompt.Contains("Ask for proof") &&
+                prompt.Contains("not independent proof") && prompt.Contains("actual permitted execution results") &&
+                prompt.Contains("Preserve counterexamples") && prompt.Contains("proportional to the user's goal") &&
+                prompt.Contains("do not upload the repository or raw local audit files"),
+                "remote asks for bounded proof, preserves uncertainty and does not equate summaries with verification");
         }
         const string slice = "Identify the timeout value; acceptance check: cite the configured duration.";
         Check(Research.Prompt("deep-dive", slice).Contains(slice) &&
@@ -544,12 +550,170 @@ not json
             "real failure/finally events clear local request activity instead of leaving a stuck local spinner");
         Check(failed.Files("Review file", ["Methods.cs"]).Contains("existing worklist"),
             "failed job replay is bounded, not an implicit inference retry loop");
-        Check(Remote.GuardCompletion(audit, "status: done\nanswer: finished").StartsWith("status: partial"),
+        Check(Remote.GuardCompletion(audit, "status: done\nanswer: finished").StartsWith("status: blocked") &&
+            !Remote.GuardCompletion(audit, "status: done\nanswer: finished").Contains("answer: finished"),
             "partial persisted file work prevents success-shaped final response");
         TestWholeScope(root, audit);
         TestFileRetryQueue(root, audit);
         TestOverviewFiles(root, audit);
         TestFileCompletion(root, audit);
+        TestAllFileEvidence(root, audit);
+    }
+
+    static void TestAllFileEvidence(string root, string audit)
+    {
+        var folder = Path.Combine(root, "all-evidence");
+        var logs = Path.Combine(audit, "all-evidence");
+        Directory.CreateDirectory(folder);
+        Directory.CreateDirectory(logs);
+        void Fixture(string name, int count) => File.WriteAllLines(Path.Combine(folder, name),
+            Enumerable.Range(0, count).Select(i =>
+                $"static int M{i:D3}() => {i}; // private-evidence-marker ".PadRight(2000, 'x')));
+        string Brief(string source, bool reject = false)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(source, @"(?m)^L(\d+): static int (M\d+)");
+            var line = int.Parse(match.Groups[1].Value);
+            return JsonSerializer.Serialize(new
+            {
+                purpose = new { text = $"Defines fixture operation at line {line}.", start = line, end = line },
+                methods = new[] { new { name = reject ? "UnsupportedInventedName" : match.Groups[2].Value,
+                    text = "Returns a fixture value.", start = line, end = line, coverage = "unknown" } },
+                unknown = ""
+            });
+        }
+        try
+        {
+            Fixture("Evidence.cs", 20);
+            var calls = 0;
+            var worker = new Research(folder, "stub", "Internal", logs, (_, source) =>
+                (Brief(source, ++calls == 1), new TokenUsage(10, 5, 0, 0)));
+            var report = FinishFiles(worker, worker.Files("Review all collected findings", ["Evidence.cs"], detail: "full"));
+            var evidence = new LocalRepository(folder).FileEvidence("Evidence.cs");
+            Check(calls == 21 && Enumerable.Range(0, 20).All(i => report.Contains($"method: M{i:D3} ")) &&
+                Enumerable.Range(1, 20).All(i => report.Contains($"purpose: Defines fixture operation at line {i}.")) &&
+                evidence.Ranges.All(r => report.Contains($"reference: {r.Citation}")),
+                "completed reports preserve all twenty methods, purposes and captured references beyond the former caps");
+            Check(report.Contains("findings: local model interpretation; unverified") &&
+                report.Contains("attempt_failure:") && report.Contains("analysis rejected; rejected output is not evidence") &&
+                !report.Contains("UnsupportedInventedName") && !report.Contains("private-evidence-marker"),
+                "recovered failures remain visible as metadata without forwarding rejected claims or raw source");
+            var refreshed = FinishFiles(worker, worker.Files("Refresh evidence", ["Evidence.cs"], refresh: true, detail: "full"));
+            Check(calls == 21 && refreshed.Contains("attempt_failure:") && refreshed.Contains("method: M019 "),
+                "fingerprint-verified cache reuse preserves all findings and their failure history");
+            Fixture("Budget.cs", 260);
+            var budgetCalls = 0;
+            var limited = new Research(folder, "stub", "Internal", logs, (_, source) =>
+            {
+                budgetCalls++;
+                return (Brief(source), new TokenUsage(10, 5, 0, 0));
+            });
+            var partial = FinishFiles(limited, limited.Files("Review bounded budget", ["Budget.cs"], detail: "full"));
+            Check(budgetCalls == 256 && partial.Contains("status: blocked") && partial.Contains("file_status: partial") &&
+                partial.Contains("256/260 inputs analyzed") && partial.Contains("method: M255 ") &&
+                !partial.Contains("method: M256 "),
+                "budget stop delivers accepted partial findings without implying unfinished ranges were analyzed");
+        }
+        finally
+        {
+            foreach (var file in Directory.EnumerateFiles(folder)) File.Delete(file);
+            Directory.Delete(folder);
+            foreach (var file in Directory.EnumerateFiles(logs)) File.Delete(file);
+            Directory.Delete(logs);
+        }
+    }
+
+    static void TestPromptMode()
+    {
+        var request = "Explain \"the project\".\nKeep the workflow clear.";
+        var options = PromptMode.Parse(["-p", request, "--yes", "--json", "--model", "head",
+            "--local-model", "local:7b", "--sensitivity", "public", "--execution"]);
+        Check(options.Prompt == request && options.Model == "head" && options.LocalModel == "local:7b" &&
+            options.Json && options.Execution && options.Sensitivity == "Public",
+            "prompt mode preserves request text and explicit model/permission options");
+        var defaults = PromptMode.Parse(["--prompt", "Explain", "--yes"]);
+        Check(!defaults.Execution && !defaults.Json && defaults.Model is null &&
+            defaults.LocalModel is null && defaults.Sensitivity == "Internal",
+            "prompt mode defaults keep shells disabled and do not change saved model settings");
+        foreach (var invalid in new string[][] { ["--prompt", "Explain"], ["--yes"], ["--prompt"],
+            ["--prompt", " ", "--yes"], ["--prompt", "Explain", "--yes", "--model"],
+            ["--prompt", "Explain", "--yes", "-p", "Again"], ["--prompt", "Explain", "--yes", "--unknown"],
+            ["--prompt", "Explain", "--yes", "--sensitivity", "Secret"] })
+        {
+            var rejected = false;
+            try { PromptMode.Parse(invalid); }
+            catch (ArgumentException) { rejected = true; }
+            Check(rejected, "invalid automation arguments fail before any model call: " + string.Join(" ", invalid));
+        }
+        foreach (var (result, exit) in new[] { ("status: done\nanswer: A terminal assistant.", 0),
+            ("status: blocked\nerrors: missing proof", 1), ("status: error\nerrors: bad arguments", 2) })
+        {
+            using var output = new StringWriter();
+            Check(PromptMode.WriteResult(result, exit, true, output) == exit, "automation preserves exit classification");
+            using var json = JsonDocument.Parse(output.ToString());
+            Check(json.RootElement.GetProperty("output").GetString() == result &&
+                json.RootElement.GetProperty("exitCode").GetInt32() == exit &&
+                json.RootElement.GetProperty("status").GetString() == result.Split('\n')[0]["status: ".Length..],
+                "automation JSON contains exactly one parseable result with status and exit code");
+        }
+        using var plain = new StringWriter();
+        PromptMode.WriteResult("status: done\nanswer: Result", 0, false, plain);
+        Check(plain.ToString().TrimEnd() == "status: done\nanswer: Result", "plain automation output is only the final result");
+        var originalOutput = Console.Out;
+        var originalError = Console.Error;
+        var originalBatch = Terminal.BatchMode;
+        using var capturedOutput = new StringWriter();
+        using var capturedError = new StringWriter();
+        try
+        {
+            Console.SetOut(capturedOutput);
+            Console.SetError(capturedError);
+            Terminal.BatchMode = true;
+            Terminal.Initialize();
+            Terminal.WriteLine("progress fixture");
+            Terminal.SetTaskActivity("local", "remote", TimeSpan.Zero);
+            Terminal.Restore();
+        }
+        finally
+        {
+            Console.SetOut(originalOutput);
+            Console.SetError(originalError);
+            Terminal.BatchMode = originalBatch;
+        }
+        Check(capturedOutput.ToString() == "" && capturedError.ToString().Trim() == "progress fixture",
+            "batch progress goes only to stderr without terminal escape sequences");
+        foreach (var arguments in new string[][] { ["--help"], ["--prompt", "-", "--yes", "--json"],
+            ["--prompt", "Explain", "--json"], ["--prompt", "-", "--yes", "--json", "--model", "stub"] })
+        {
+            var start = Remote.SelfStart(arguments);
+            start.RedirectStandardInput = start.RedirectStandardOutput = start.RedirectStandardError = true;
+            start.Environment["LEAN_LOCAL_BASE_URL"] = "http://not-loopback.invalid";
+            using var process = Process.Start(start)!;
+            process.StandardInput.Write(arguments.Contains("--model") ? "Explain \"this project\".\nDescribe its workflow." : " \n");
+            process.StandardInput.Close();
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(10000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new InvalidOperationException("Prompt mode validation subprocess timed out.");
+            }
+            var text = stdout.GetAwaiter().GetResult();
+            var error = stderr.GetAwaiter().GetResult();
+            if (arguments[0] == "--help")
+                Check(process.ExitCode == 0 && text.StartsWith("Usage: lean --prompt") && error == "",
+                    "real CLI help exits without starting the REPL or contacting models");
+            else
+            {
+                using var json = JsonDocument.Parse(text);
+                var runtimeFailure = arguments.Contains("--model");
+                var expectedExit = runtimeFailure ? 1 : 2;
+                var expectedError = runtimeFailure ? "No local models available" :
+                    arguments[1] == "-" ? "stdin is empty" : "--yes is required";
+                Check(process.ExitCode == expectedExit && json.RootElement.GetProperty("exitCode").GetInt32() == expectedExit &&
+                    error.Contains(expectedError) && !text.Contains('\x1b'),
+                    "real CLI separates stdin/approval errors from provider failure with clean JSON and no remote calls");
+            }
+        }
     }
 
     static void TestFileCompletion(string root, string audit)
@@ -564,6 +728,11 @@ not json
                 calls++;
                 return (FileJson(), new TokenUsage(10, 5, 0, 0));
             });
+            foreach (var invalid in new[] { "src\\LeanCli", "LeanCli", "." })
+                Check(worker.Files("Explain project", [invalid]).StartsWith("status: error"),
+                    "guessed directories are rejected before registering research scope");
+            Check(Directory.GetFiles(folder, "job-*.json").Length == 0 && calls == 0,
+                "invalid paths do not poison later valid jobs or spend local inferences");
             var started = worker.Files("Review settings helper", ["Methods.cs"]);
             var id = Field(started, "jobId");
             var ready = worker.FileStatus(id, Resume(started), 20);
@@ -615,15 +784,89 @@ not json
                 Send(new(fields)).Contains("'assessment' must be a string"),
                 "wrong-type and missing completion fields report the exact required argument");
             Check(worker.FileStatus(id, waitSeconds: 0).StartsWith("status: review") &&
-                Remote.GuardCompletion(folder, "status: done").StartsWith("status: partial") && calls == 1,
+                Remote.GuardCompletion(folder, "status: done").StartsWith("status: blocked") &&
+                Remote.CompletionIssue(folder, "status: done")!.Contains(id) && calls == 1,
                 "rejected sign-offs retain reviewed evidence and cannot be bypassed by an early final completion");
             var accepted = Assess((citation + " Reviewed bounded findings; semantic gaps remain.").PadRight(600, 'x'));
             Check(accepted.StartsWith("status: done") && calls == 1 &&
                 Remote.GuardCompletion(folder, "status: done") == "status: done",
                 "corrected 600-character cited sign-off completes through MCP without repeating inference");
+            var final = "status: done\nanswer: The helper returns a configured setting.\nreferences: Methods.cs:1-4";
+            string Hook(string tool, object arguments)
+            {
+                using var output = new StringWriter();
+                var code = Remote.CompletionHook(folder, new StringReader(JsonSerializer.Serialize(new
+                    { toolName = tool, toolArgs = arguments })), output);
+                Check(code == 0, "completion hook processes valid input");
+                return output.ToString().Trim();
+            }
+            Check(Hook("task_complete", new { summary = final }).Contains("\"permissionDecision\":\"deny\"") &&
+                Remote.CompletionIssue(folder, final)!.Contains("bounded excerpt"),
+                "autopilot is denied before finalization when approved overviews still lack direct source support");
+            worker.Call("excerpt", path: "Methods.cs", start: 1, end: 4);
+            Check(Hook("task_complete", new { summary = final }) == "{}" &&
+                Hook("task_complete", JsonSerializer.Serialize(new { summary = final })) == "{}" &&
+                Hook("lean-local-local_research", new { intent = "file-status" }) == "{}",
+                "cited current source permits completion; string payloads work and unrelated tools keep normal permissions");
+            var partial = final.Replace("status: done", "status: partial") + "\ngaps: startup behavior still unverified";
+            Check(Hook("task_complete", new { summary = partial }).Contains("\"permissionDecision\":\"deny\"") &&
+                Remote.GuardCompletion(folder, partial).StartsWith("status: blocked") &&
+                !Remote.GuardCompletion(folder, partial).Contains("\nanswer:") &&
+                Remote.GuardCompletion(folder, partial).Contains("gaps: startup behavior still unverified"),
+                "partial prose is denied and withheld rather than delivered as an accepted answer");
+            Check(Remote.GuardCompletion(folder, "status: error\nerrors: Ollama connection refused")
+                .Contains("errors: Ollama connection refused"), "withheld answers retain infrastructure failure diagnostics");
+            Remote.CreateCompletionPlugin(folder);
+            var hookPath = Path.Combine(folder, "completion-guard", "com.github.copilot", "hooks", "hooks.json");
+            using var hooks = JsonDocument.Parse(File.ReadAllText(hookPath));
+            var entry = hooks.RootElement.GetProperty("hooks").GetProperty("preToolUse")[0];
+            Check(entry.GetProperty("exec").GetString() == Environment.ProcessPath &&
+                entry.GetProperty("args").EnumerateArray().Any(a => a.GetString() == "--completion-hook"),
+                "request-scoped plugin invokes the current executable without shell quoting or global hook changes");
+            var hookStart = Remote.SelfStart("--completion-hook", folder);
+            hookStart.RedirectStandardInput = hookStart.RedirectStandardOutput = hookStart.RedirectStandardError = true;
+            using var process = Process.Start(hookStart)!;
+            process.StandardInput.WriteLine(JsonSerializer.Serialize(new { toolName = "task_complete", toolArgs = new { summary = partial } }));
+            process.StandardInput.Close();
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(10000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new InvalidOperationException("Completion hook process timed out.");
+            }
+            Check(process.ExitCode == 0 && stdout.GetAwaiter().GetResult().Contains("\"permissionDecision\":\"deny\"") &&
+                string.IsNullOrWhiteSpace(stderr.GetAwaiter().GetResult()),
+                "real hook subprocess denies incomplete output through its JSON protocol without model calls");
+            var planPath = Path.Combine(folder, "plan-proof.json");
+            File.WriteAllText(planPath, JsonSerializer.Serialize(new { Status = "done", Generation = 2 }));
+            Check(Remote.CompletionIssue(folder, final)!.Contains("bounded excerpt"),
+                "newer plan snapshots invalidate older source proof");
+            File.Delete(planPath);
+            var jobPath = Directory.GetFiles(folder, "job-*.json").Single();
+            var excerptPath = Directory.GetFiles(folder, "research-*.json").Single(path =>
+                JsonSerializer.Deserialize<CopilotRun>(File.ReadAllText(path))!.Commands.Any(c => c.StartsWith("excerpt: ")));
+            File.Move(jobPath, jobPath + ".saved");
+            File.Move(excerptPath, excerptPath + ".saved");
+            Check(Remote.CompletionIssue(folder, final)!.Contains("bounded excerpt"),
+                "legacy research without file jobs still requires source proof");
+            File.Move(excerptPath + ".saved", excerptPath);
+            Check(Remote.CompletionIssue(folder, final) is null,
+                "legacy research can complete with current cited source proof");
+            File.Move(jobPath + ".saved", jobPath);
         }
         finally
         {
+            var plugin = Path.Combine(folder, "completion-guard");
+            if (Directory.Exists(plugin))
+            {
+                var hooks = Path.Combine(plugin, "com.github.copilot", "hooks");
+                File.Delete(Path.Combine(hooks, "hooks.json"));
+                Directory.Delete(hooks);
+                Directory.Delete(Path.Combine(plugin, "com.github.copilot"));
+                File.Delete(Path.Combine(plugin, "plugin.json"));
+                Directory.Delete(plugin);
+            }
             foreach (var file in Directory.EnumerateFiles(folder)) File.Delete(file);
             Directory.Delete(folder);
         }
@@ -853,7 +1096,7 @@ not json
                 first.Contains("remaining 32") && first.Contains("excluded entries/subtrees 2"),
                 "whole-project scope snapshots all eligible files; first bounded batch exposes exact remaining/excluded counts");
             Check(research.FileComplete(id, Resume(first), "Everything is complete").StartsWith("status: error") &&
-                Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: partial"),
+                Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: blocked"),
                 "completion gate rejects stopping after the first batch");
             var done = FinishFiles(research, first);
             Check(calls == 40 && done.Contains("status: done") && done.Contains("40/40 files reviewed"),
@@ -871,7 +1114,7 @@ not json
             var current = research.FileStatus(id, waitSeconds: 0);
             Check(research.FileComplete(id, Resume(current), "File000.cs:1-4 reviewed").StartsWith("status: stale"),
                 "completion checks current fingerprints and inventory, not just old captured ranges");
-            Check(Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: partial"),
+            Check(Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: blocked"),
                 "stale current scope cannot pass the final guard while awaiting refreshed work");
             var renewed = research.Files("Validate edits across the requested project", ["File000.cs"], refresh: true);
             var revised = FinishFiles(research, renewed);
@@ -880,7 +1123,7 @@ not json
             Check(Remote.GuardCompletion(scopeAudit, "status: complete") == "status: complete",
                 "revalidated edited snapshot passes while old approvals remain stale");
             research.Call("excerpt", path: "File039.cs", start: 1, end: 4, refresh: true);
-            Check(Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: partial"),
+            Check(Remote.GuardCompletion(scopeAudit, "status: complete").StartsWith("status: blocked"),
                 "refresh alone does not count as revalidation or completion");
             var afterExcerpt = FinishFiles(research, research.Files("Revalidate after explicit excerpt refresh", ["File039.cs"]));
             Check(afterExcerpt.Contains("41/41 files reviewed") && afterExcerpt.Contains("status: done") && calls == 42,
@@ -979,7 +1222,7 @@ not json
         var targeted = research.PlanCall("continue", "task", resume: Resume(appended), stepId: "later");
         Check(targeted.Contains("unit_step: Step 5/5 (later)") && targeted.Contains("Component2.cs:1-30") &&
             targeted.Contains("followup=partial"), "remote selects a later concrete dive while earlier work remains pending");
-        Check(Remote.GuardCompletion(audit, "status: complete\nanswer: all done").StartsWith("status: partial"),
+        Check(Remote.GuardCompletion(audit, "status: complete\nanswer: all done").StartsWith("status: blocked"),
             "unfinished persisted plan prevents success-shaped final status");
         research.Call("excerpt", path: "Program.cs", start: 1, end: 1, refresh: true);
         Check(research.PlanCall("status", "task").Contains("failure: snapshot_changed"),

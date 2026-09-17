@@ -1,11 +1,16 @@
 using System.Text.RegularExpressions;
 
+if (args.FirstOrDefault() == "--completion-hook")
+{
+    Environment.ExitCode = args.Length == 2 ? Remote.CompletionHook(args[1], Console.In, Console.Out) : 1;
+    return;
+}
 if (args.FirstOrDefault() == "--mcp-server")
 {
     Environment.ExitCode = McpServer.Run(args);
     return;
 }
-if (args.Contains("--self-test"))
+if (args.FirstOrDefault() == "--self-test")
 {
     SelfTests.Run();
     if (args.Contains("--overview-integration"))
@@ -18,6 +23,11 @@ if (args.Contains("--self-test"))
         SelfTests.ScopeIntegration();
     if (args.Contains("--local-integration"))
         SelfTests.LocalIntegration();
+    return;
+}
+if (args.Length > 0)
+{
+    Environment.ExitCode = PromptMode.Run(args);
     return;
 }
 
@@ -79,6 +89,7 @@ invalidates existing plan evidence. Partial work is retained; retries and total 
 Diagnostics: --self-test; add --file-integration for focused localhost file/method checks,
 --scope-integration for whole-scope batch/refresh fixture checks,
 or --local-integration for legacy plan and sample checks.
+Automation: lean --prompt "Your request" --yes [--json]. See lean --help for options.
 """);
                 continue;
             case "/model":

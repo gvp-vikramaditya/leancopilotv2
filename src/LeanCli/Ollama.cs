@@ -261,9 +261,9 @@ static class Ollama
         return false;
     }
 
-    public static bool Warm(string model)
+    public static bool Warm(string model, bool ensureReady = true)
     {
-        if (!EnsureReady())
+        if (ensureReady && !EnsureReady())
             return false;
 
         Logger.Info($"Warming Ollama model {model}");

@@ -129,6 +129,7 @@ static class McpServer
                     "assessment validates source freshness and records remote scope review. Do not finish after one batch. " +
                     "After edits files refresh=true preserves required scope and reuses only fingerprint-verified unchanged files. " +
                     "Results are compact file purposes, named methods, validated citations and explicit coverage/gaps; " +
+                    "all collected distinct findings and captured references are included, with rejected-attempt metadata. " +
                     "not raw source or proof of exhaustive method coverage. Repeating files reuses the job; " +
                     "status replays safely, omit resume to recover current cursor/last batch. Task budget: 256 file analyses, " +
                     "separate from 32 legacy probes/excerpts. Exhaustion remains blocked with remaining work, never done. " +

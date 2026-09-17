@@ -24,6 +24,7 @@ sealed partial class Research
         public bool Blocked { get; set; }
         public List<string> Findings { get; } = [];
         public List<string> Gaps { get; } = [];
+        public List<string> AttemptFailures { get; } = [];
         public bool Reviewed => Captured is not null && NextRange == Captured.Ranges.Length && !Blocked;
         public bool Finished => Reviewed || Blocked;
     }
@@ -70,6 +71,9 @@ sealed partial class Research
                 if (!ValidText(objective, 1000) || paths is { Length: > 2000 } ||
                     paths?.Any(p => string.IsNullOrWhiteSpace(p) || p.Length > 512 || p.Any(char.IsControl)) == true)
                     throw new ArgumentException("files requires an objective (1..1000 characters) and up to 2000 relative text paths; omit paths for all eligible files.");
+                var repository = refresh ? new LocalRepository(root) : Repository;
+                if (paths is { Length: > 0 })
+                    paths = paths.Select(repository.CanonicalPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 var key = JsonSerializer.Serialize(new { objective, paths, Generation, detail });
                 var existing = FileJobs.FirstOrDefault(j => j.Key == key && j.Snapshot == Generation);
                 if (!refresh && existing is not null)
@@ -90,7 +94,7 @@ sealed partial class Research
                     foreach (var path in paths) RequiredFiles.Add(path);
                 if (refresh)
                 {
-                    Repository = new(root);
+                    Repository = repository;
                     Reports.Clear();
                     Generation++;
                     InvalidatePlan();
@@ -114,7 +118,9 @@ sealed partial class Research
                     created.Gaps = ["job startup failed: " + OneLine(ex.Message)];
                 }
                 Logger.Error($"File objective: {ex.Message}");
-                return $"status: error\nsensitivity: {sensitivity}\nerrors: {OneLine(ex.Message)}";
+                return $"status: error\nsensitivity: {sensitivity}\nerrors: {OneLine(ex.Message)}\n" +
+                    $"next: paths must be discovered FILES relative to {root}, not directories. " +
+                    "For the whole project omit paths or use []; invalid input does not create a worklist.";
             }
         }
     }
@@ -208,6 +214,7 @@ sealed partial class Research
     {
         try
         {
+            var cachedReports = new List<string>();
             lock (StateLock)
             {
                 var restoreScope = refresh || FileJobs.Any(j => j != job && j.Snapshot != Generation) &&
@@ -236,7 +243,8 @@ sealed partial class Research
                             work.NextRange = prior.NextRange;
                             work.Findings.AddRange(prior.Findings);
                             work.Gaps.AddRange(prior.Gaps);
-                            job.Results.Add(FileReport(work) + "\ncache: unchanged source fingerprint revalidated; no inference");
+                            work.AttemptFailures.AddRange(prior.AttemptFailures);
+                            cachedReports.Add(FileReport(work) + "\ncache: unchanged source fingerprint revalidated; no inference");
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
                         {
@@ -248,7 +256,7 @@ sealed partial class Research
                     job.Queue.Enqueue(work);
                 SaveFileJob(job);
             }
-            await RunFileBatch(job);
+            await RunFileBatch(job, cachedReports);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
         {
@@ -263,11 +271,11 @@ sealed partial class Research
         job.Worker = Task.Run(() => RunFileBatch(job));
     }
 
-    async Task RunFileBatch(FileJob job)
+    async Task RunFileBatch(FileJob job, List<string>? initialReports = null)
     {
         try
         {
-            var reports = new List<string>();
+            var reports = initialReports ?? [];
             var units = 0;
             while (units < FileBatchInputs)
             {
@@ -310,6 +318,9 @@ sealed partial class Research
             }
             lock (StateLock)
             {
+                if (FileAnalyses >= FileAnalysisLimit || job.StopReason.Length > 0)
+                    reports.AddRange(job.Files.Where(f => !f.Finished &&
+                        !reports.Any(r => r.StartsWith($"file: {f.Path}\n", StringComparison.Ordinal))).Select(FileReport));
                 job.LastBatch = reports.OrderBy(report => Array.FindIndex(job.Files,
                     f => report.StartsWith($"file: {f.Path}\n", StringComparison.Ordinal))).ToArray();
                 job.Results.AddRange(job.LastBatch);
@@ -424,6 +435,10 @@ sealed partial class Research
         lock (StateLock)
         {
             var valid = brief.Length > 0 && !chunkGaps.Any(g => g.StartsWith("local ", StringComparison.Ordinal));
+            if (!valid)
+                work.AttemptFailures.Add($"attempt_failure: {id}; range {range.Citation}; " +
+                    (timedOut ? "timeout" : unavailable ? "service unavailable" : "analysis rejected") +
+                    "; rejected output is not evidence");
             if (valid)
             {
                 work.NextRange++;
@@ -487,21 +502,20 @@ sealed partial class Research
         if (work.Captured is null)
             return $"file: {work.Path}\nfile_status: blocked\ncoverage: no source captured\ngaps: {OneLine(string.Join("; ", gaps))}";
         var findings = work.Findings;
-        if (findings.Count(l => l.StartsWith("method:")) > 16)
-            gaps.Add("brief limited to 16 method entries; additional method findings retained in local audit");
-        var methods = findings.Where(l => l.StartsWith("method:")).Distinct().Take(16);
-        var purposes = findings.Where(l => l.StartsWith("purpose:")).Distinct().Take(2);
+        var methods = findings.Where(l => l.StartsWith("method:")).Distinct();
+        var purposes = findings.Where(l => l.StartsWith("purpose:")).Distinct();
         var unknowns = findings.Where(l => l.StartsWith("unknown:")).Distinct();
         gaps.AddRange(unknowns.Select(l => l["unknown:".Length..].Trim()));
-        return $"file: {work.Path}\nfile_status: {(work.Blocked ? "blocked" : gaps.Count > 0 ? "partial" : "complete")}\n" +
+        return $"file: {work.Path}\nfile_status: {(work.Blocked ? "blocked" : !work.Reviewed || gaps.Count > 0 ? "partial" : "complete")}\n" +
             $"detail: {work.Detail}\n" +
+            "findings: local model interpretation; unverified\n" +
             $"coverage: {work.Captured.Ranges.Sum(r => r.Lines.Length)}/{work.Captured.TotalLines} lines captured; " +
             $"{work.NextRange}/{work.Captured.Ranges.Length} inputs analyzed; " +
             (work.Detail == "overview" ? "overview only, no method inventory requested\n" :
                 "method inventory model-reported, not independently exhaustive\n") +
-            string.Join("\n", work.Captured.Ranges.Take(8).Select(r => $"reference: {r.Citation}")) +
-            (work.Captured.Ranges.Length > 8 ? "\nreferences: additional captured ranges retained locally" : "") + "\n" +
+            string.Join("\n", work.Captured.Ranges.Select(r => $"reference: {r.Citation}")) + "\n" +
             string.Join("\n", purposes.Concat(methods)) + "\n" +
+            (work.AttemptFailures.Count == 0 ? "" : string.Join("\n", work.AttemptFailures) + "\n") +
             "gaps: " + (gaps.Count == 0 ? "none reported within captured file; semantic verification remains head responsibility" :
                 OneLine(string.Join("; ", gaps.Distinct())));
     }
@@ -559,7 +573,7 @@ sealed partial class Research
             Blocked = job.Files.Count(f => f.Blocked), FileAnalyses, FileAnalysisLimit,
             Fingerprints = JobFingerprints(job), BuildId = McpServer.BuildId,
             Work = job.Files.Select(f => new { f.Path, f.NextRange, f.Attempts, f.TimeoutSplits, f.ReadyAt, f.Blocked, f.Reviewed,
-                TotalInputs = f.Captured?.Ranges.Length, f.Gaps }) });
+                TotalInputs = f.Captured?.Ranges.Length, f.Gaps, f.AttemptFailures }) });
 
     void InvalidateFileJobs()
     {
